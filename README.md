@@ -32,29 +32,46 @@ python agent.py
 ./run.sh
 ```
 
-## Deploy helper
+## Operational git workflow (agent node)
 
-Use root `deploy.sh` on each node to update code and dependencies:
+Use once per node to connect an existing operational folder to Git while preserving local runtime data:
+
+```bash
+cd /Users/Shared
+tar -czf TART_Agent_backup_$(date +%Y%m%d_%H%M%S).tar.gz TART_Agent
+
+cd /Users/Shared/TART_Agent
+mkdir -p /tmp/tart_agent_keep
+cp -a .env logs /tmp/tart_agent_keep/ 2>/dev/null || true
+
+git init
+git remote add origin https://github.com/sabatico/tart_agent.git
+git fetch origin
+git reset --hard origin/main
+git branch -M main
+git branch --set-upstream-to=origin/main main
+
+cp -a /tmp/tart_agent_keep/.env /Users/Shared/TART_Agent/ 2>/dev/null || true
+cp -a /tmp/tart_agent_keep/logs /Users/Shared/TART_Agent/ 2>/dev/null || true
+```
+
+Daily update command:
 
 ```bash
 cd /Users/Shared/TART_Agent
-chmod +x deploy.sh
 ./deploy.sh
 ```
 
-Optional service restart:
+Optional service restart during deploy:
 
 ```bash
 RESTART_CMD='sudo launchctl kickstart -k system/com.tart-agent' ./deploy.sh
 ```
 
-## Run helper
-
-Use root `run.sh` for quick startup:
+Quick manual start:
 
 ```bash
 cd /Users/Shared/TART_Agent
-chmod +x run.sh
 ./run.sh
 ```
 

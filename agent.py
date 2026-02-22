@@ -193,13 +193,37 @@ def vm_ip(name):
 
 @app.route('/vms/<name>', methods=['DELETE'])
 def delete_vm(name):
+    delete_error = None
     try:
         vnc.stop_proxy(name)
-        tart_runner.delete_vm(name)
-        return jsonify({'status': 'deleted'})
     except Exception as e:
+        logger.warning("delete_vm(%s) — stop_proxy warning: %s", name, e)
+
+    # Try to stop first so delete works even for currently running VMs.
+    try:
+        tart_runner.stop_vm(name)
+    except Exception as e:
+        logger.warning("delete_vm(%s) — stop warning: %s", name, e)
+
+    try:
+        tart_runner.delete_vm(name)
+    except Exception as e:
+        delete_error = e
         logger.error("delete_vm(%s) failed: %s", name, e)
-        return jsonify({'error': str(e)}), 500
+
+    # Final source of truth: ensure VM is actually absent.
+    try:
+        remaining = tart_runner.list_vms()
+        names = {(v.get('name') or v.get('Name')) for v in remaining}
+    except Exception as e:
+        logger.error("delete_vm(%s) — post-delete list failed: %s", name, e)
+        return jsonify({'error': f'Post-delete verification failed: {e}'}), 500
+
+    if name in names:
+        detail = str(delete_error) if delete_error else 'VM still present after delete attempt'
+        return jsonify({'error': detail}), 500
+
+    return jsonify({'status': 'deleted'})
 
 
 # ── VNC ────────────────────────────────────────────────────────────────────────

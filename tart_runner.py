@@ -85,8 +85,24 @@ def pull_vm(registry_tag, name):
 
 
 def delete_vm(name):
-    """Delete local VM (frees disk space)."""
-    _run(['delete', name], timeout=30)
+    """
+    Delete local VM (frees disk space).
+    Tart can report "does not exist" for running VMs, so always stop first.
+    """
+    # Ensure VM is not running before delete.
+    stop_vm(name)
+
+    try:
+        _run(['delete', name], timeout=30)
+    except RuntimeError as e:
+        # If Tart says missing and VM is truly absent, treat as success.
+        if not vm_exists(name):
+            return
+        raise RuntimeError(str(e))
+
+    # Verify VM is gone after delete.
+    if vm_exists(name):
+        raise RuntimeError(f'tart delete reported success but VM "{name}" still exists')
 
 
 def vm_exists(name):

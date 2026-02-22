@@ -44,6 +44,7 @@ def create_vm(name, base_image):
 
 def start_vm(name):
     """Start a VM with VNC enabled as a background subprocess."""
+    logger.info("start_vm(%s): launching 'tart run --no-graphics --vnc %s'", name, name)
     proc = subprocess.Popen(
         ['tart', 'run', '--no-graphics', '--vnc', name],
         stdout=subprocess.DEVNULL,
@@ -53,6 +54,7 @@ def start_vm(name):
     if proc.poll() is not None:
         stderr = proc.stderr.read().decode()
         raise RuntimeError(f"tart run failed immediately: {stderr}")
+    logger.info("start_vm(%s): tart run process started (pid=%s)", name, proc.pid)
     return proc
 
 

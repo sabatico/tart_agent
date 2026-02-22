@@ -59,11 +59,12 @@ def _probe_rfb_banner(host, timeout=3):
 
 def _is_supported_rfb_banner(banner):
     """
-    Accept only noVNC-compatible RFB versions.
+    Accept any valid RFB banner. Both Tart's hypervisor VNC (127.0.0.1:5900,
+    via Apple Virtualization.framework) and macOS Screen Sharing inside the VM
+    present 'RFB 003.889'. Rejecting by version was over-strict and prevented
+    all Apple VNC endpoints from being used.
     """
-    if not banner or not banner.startswith('RFB '):
-        return False
-    return banner in ('RFB 003.003', 'RFB 003.007', 'RFB 003.008')
+    return bool(banner and banner.startswith('RFB '))
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -270,43 +271,88 @@ def delete_vm(name):
 @app.route('/vnc/<name>/start', methods=['POST'])
 def vnc_start(name):
     ip = tart_runner.get_vm_ip(name)
-    # Tart VNC is commonly exposed on the node host (localhost), but older
-    # setups may target vm_ip:5900. Try host-local first, then vm_ip fallback.
-    candidates = ['127.0.0.1']
+    localhost = '127.0.0.1'
+
+    localhost_reachable = _wait_for_vnc(localhost)
+    localhost_banner = _probe_rfb_banner(localhost)
+    localhost_supported = _is_supported_rfb_banner(localhost_banner)
+
+    vm_ip_reachable = False
+    vm_ip_banner = None
+    vm_ip_supported = False
     if ip:
-        candidates.append(ip)
+        vm_ip_reachable = _wait_for_vnc(ip)
+        vm_ip_banner = _probe_rfb_banner(ip)
+        vm_ip_supported = _is_supported_rfb_banner(vm_ip_banner)
+
+    logger.info(
+        "vnc_start(%s) probe localhost=%s:%d reachable=%s banner=%r supported=%s; "
+        "vm_ip=%s:%d reachable=%s banner=%r supported=%s preference=%s",
+        name,
+        localhost,
+        agent_config.VNC_PORT,
+        localhost_reachable,
+        localhost_banner,
+        localhost_supported,
+        ip,
+        agent_config.VNC_PORT,
+        vm_ip_reachable,
+        vm_ip_banner,
+        vm_ip_supported,
+        agent_config.VNC_TARGET_PREFERENCE,
+    )
 
     target_host = None
+    selected_mode = None
     selected_banner = None
-    for host in candidates:
-        if _wait_for_vnc(host):
-            banner = _probe_rfb_banner(host)
-            logger.info("vnc_start(%s) probe host=%s:%d banner=%r",
-                        name, host, agent_config.VNC_PORT, banner)
-            if _is_supported_rfb_banner(banner):
-                target_host = host
-                selected_banner = banner
-                break
 
+    if agent_config.VNC_TARGET_PREFERENCE == 'localhost_first':
+        if localhost_supported:
+            target_host = localhost
+            selected_mode = 'localhost_primary'
+            selected_banner = localhost_banner
+        elif vm_ip_supported:
+            target_host = ip
+            selected_mode = 'vm_ip_fallback'
+            selected_banner = vm_ip_banner
+    else:  # default: vm_ip_first
+        if vm_ip_supported:
+            target_host = ip
+            selected_mode = 'vm_ip_primary'
+            selected_banner = vm_ip_banner
+        elif localhost_supported:
+            target_host = localhost
+            selected_mode = 'localhost_fallback'
+            selected_banner = localhost_banner
     if not target_host:
-        details = []
-        for host in candidates:
-            banner = _probe_rfb_banner(host)
-            if banner:
-                details.append(f'{host}:{agent_config.VNC_PORT} banner={banner}')
-            else:
-                details.append(f'{host}:{agent_config.VNC_PORT} no-banner')
+        details = [
+            f'{localhost}:{agent_config.VNC_PORT} reachable={localhost_reachable} '
+            f'banner={localhost_banner or "no-banner"}'
+        ]
+        if ip:
+            details.append(
+                f'{ip}:{agent_config.VNC_PORT} reachable={vm_ip_reachable} '
+                f'banner={vm_ip_banner or "no-banner"}'
+            )
         return jsonify({
             'error': (
-                'No Tart-compatible VNC endpoint found. '
+                'No reachable VNC endpoint detected on either VM IP or localhost. '
+                f'Current preference={agent_config.VNC_TARGET_PREFERENCE}. '
                 f'Probe details: {", ".join(details)}'
             )
         }), 400
 
     try:
         port = vnc.start_proxy(name, target_host)
-        logger.info("vnc_start(%s) selected target=%s:%d banner=%r websockify_port=%d",
-                    name, target_host, agent_config.VNC_PORT, selected_banner, port)
+        logger.info(
+            "vnc_start(%s) selected mode=%s target=%s:%d banner=%r websockify_port=%d",
+            name,
+            selected_mode,
+            target_host,
+            agent_config.VNC_PORT,
+            selected_banner,
+            port,
+        )
         return jsonify({'port': port})
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 500

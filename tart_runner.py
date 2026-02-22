@@ -43,9 +43,9 @@ def create_vm(name, base_image):
 
 
 def start_vm(name):
-    """Start a VM as a background subprocess (tart run is blocking)."""
+    """Start a VM with VNC enabled as a background subprocess."""
     proc = subprocess.Popen(
-        ['tart', 'run', '--no-graphics', name],
+        ['tart', 'run', '--no-graphics', '--vnc', name],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )

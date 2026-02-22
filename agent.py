@@ -8,7 +8,9 @@ Run with:
 Or via start_agent.sh which injects environment variables.
 """
 import logging
+import socket
 import threading
+import time
 
 from flask import Flask, jsonify, request, abort
 
@@ -25,6 +27,43 @@ vnc = vnc_manager.VncManager()
 # In-progress async operation tracker: {vm_name: {op, status, progress, error}}
 _ops = {}
 _ops_lock = threading.Lock()
+
+
+def _wait_for_vnc(host, timeout=8, interval=0.4):
+    """Wait until VNC port is reachable from the agent host."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, agent_config.VNC_PORT), timeout=2):
+                return True
+        except OSError:
+            time.sleep(interval)
+    return False
+
+
+def _probe_rfb_banner(host, timeout=3):
+    """
+    Probe VNC endpoint and read initial RFB protocol banner.
+    Expected form: 'RFB 003.008'
+    """
+    try:
+        with socket.create_connection((host, agent_config.VNC_PORT), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            data = sock.recv(12)
+            if not data:
+                return None
+            return data.decode(errors='replace').strip()
+    except OSError:
+        return None
+
+
+def _is_supported_rfb_banner(banner):
+    """
+    Accept only noVNC-compatible RFB versions.
+    """
+    if not banner or not banner.startswith('RFB '):
+        return False
+    return banner in ('RFB 003.003', 'RFB 003.007', 'RFB 003.008')
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -231,10 +270,43 @@ def delete_vm(name):
 @app.route('/vnc/<name>/start', methods=['POST'])
 def vnc_start(name):
     ip = tart_runner.get_vm_ip(name)
-    if not ip:
-        return jsonify({'error': 'VM has no IP yet — still booting?'}), 400
+    # Tart VNC is commonly exposed on the node host (localhost), but older
+    # setups may target vm_ip:5900. Try host-local first, then vm_ip fallback.
+    candidates = ['127.0.0.1']
+    if ip:
+        candidates.append(ip)
+
+    target_host = None
+    selected_banner = None
+    for host in candidates:
+        if _wait_for_vnc(host):
+            banner = _probe_rfb_banner(host)
+            logger.info("vnc_start(%s) probe host=%s:%d banner=%r",
+                        name, host, agent_config.VNC_PORT, banner)
+            if _is_supported_rfb_banner(banner):
+                target_host = host
+                selected_banner = banner
+                break
+
+    if not target_host:
+        details = []
+        for host in candidates:
+            banner = _probe_rfb_banner(host)
+            if banner:
+                details.append(f'{host}:{agent_config.VNC_PORT} banner={banner}')
+            else:
+                details.append(f'{host}:{agent_config.VNC_PORT} no-banner')
+        return jsonify({
+            'error': (
+                'No Tart-compatible VNC endpoint found. '
+                f'Probe details: {", ".join(details)}'
+            )
+        }), 400
+
     try:
-        port = vnc.start_proxy(name, ip)
+        port = vnc.start_proxy(name, target_host)
+        logger.info("vnc_start(%s) selected target=%s:%d banner=%r websockify_port=%d",
+                    name, target_host, agent_config.VNC_PORT, selected_banner, port)
         return jsonify({'port': port})
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 500

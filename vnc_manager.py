@@ -45,7 +45,7 @@ class VncManager:
             f'{agent_config.WEBSOCKIFY_PORT_MIN}-{agent_config.WEBSOCKIFY_PORT_MAX}'
         )
 
-    def start_proxy(self, vm_name, vm_ip):
+    def start_proxy(self, vm_name, target_host):
         """
         Start websockify for a VM. Reuses existing process if alive.
         Returns the local port number.
@@ -58,7 +58,7 @@ class VncManager:
                 del self._proxies[vm_name]
 
         port = self._find_free_port()
-        target = f'{vm_ip}:{agent_config.VNC_PORT}'
+        target = f'{target_host}:{agent_config.VNC_PORT}'
         cmd = [agent_config.WEBSOCKIFY_BIN, str(port), target]
 
         logger.info("Starting websockify: port %d → %s (vm=%s)", port, target, vm_name)
@@ -78,11 +78,27 @@ class VncManager:
             stderr = proc.stderr.read().decode() if proc.stderr else ''
             raise RuntimeError(f"websockify failed to start for {vm_name}: {stderr}")
 
+        def _drain_stderr():
+            if not proc.stderr:
+                return
+            try:
+                while True:
+                    line = proc.stderr.readline()
+                    if not line:
+                        break
+                    msg = line.decode(errors='replace').strip()
+                    if msg:
+                        logger.info("websockify[%s]: %s", vm_name, msg)
+            except Exception:
+                pass
+
+        threading.Thread(target=_drain_stderr, daemon=True).start()
+
         with self._lock:
             self._proxies[vm_name] = {
                 'process': proc,
                 'port': port,
-                'vm_ip': vm_ip,
+                'target_host': target_host,
                 'started_at': time.time(),
             }
 

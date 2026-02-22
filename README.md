@@ -28,6 +28,34 @@ export REGISTRY_URL="YOUR URL TO DOCKER REGISTRY"
 # 6. Start the agent
 # Using 'python' here will automatically use the venv's python 3.14 [5]
 python agent.py
+# or: helper script that prepares venv + deps automatically
+./run.sh
+```
+
+## Deploy helper
+
+Use root `deploy.sh` on each node to update code and dependencies:
+
+```bash
+cd /Users/Shared/TART_Agent
+chmod +x deploy.sh
+./deploy.sh
+```
+
+Optional service restart:
+
+```bash
+RESTART_CMD='sudo launchctl kickstart -k system/com.tart-agent' ./deploy.sh
+```
+
+## Run helper
+
+Use root `run.sh` for quick startup:
+
+```bash
+cd /Users/Shared/TART_Agent
+chmod +x run.sh
+./run.sh
 ```
 
 ## Endpoints

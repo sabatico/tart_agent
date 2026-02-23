@@ -2,6 +2,7 @@ import json
 import logging
 import subprocess
 import time
+import agent_config
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +79,18 @@ def stop_vm(name, timeout=60):
 
 def push_vm(name, registry_tag):
     """Push VM disk to registry. Blocking — can take many minutes."""
-    _run(['push', name, registry_tag], timeout=3600)
+    args = ['push', name, registry_tag]
+    if agent_config.REGISTRY_INSECURE:
+        args.append('--insecure')
+    _run(args, timeout=3600)
 
 
 def pull_vm(registry_tag, name):
     """Pull VM disk from registry. Blocking — can take many minutes."""
-    _run(['pull', registry_tag, name], timeout=3600)
+    args = ['pull', registry_tag, name]
+    if agent_config.REGISTRY_INSECURE:
+        args.append('--insecure')
+    _run(args, timeout=3600)
 
 
 def delete_vm(name):

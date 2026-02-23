@@ -24,6 +24,8 @@ pip install -r requirements.txt
 # AGENT_TOKEN must match the value in your Flask manager's .env [3, 4]
 export AGENT_TOKEN="your-shared-secret"
 export REGISTRY_URL="YOUR URL TO DOCKER REGISTRY"
+# For plain HTTP local registries (default: true)
+export REGISTRY_INSECURE="true"
 
 # 6. Start the agent
 # Using 'python' here will automatically use the venv's python 3.14 [5]

@@ -69,7 +69,7 @@ def _run(args, timeout=30, check=True):
 
 def _run_with_progress(args, timeout=30, progress_cb=None):
     """
-    Run a tart command and emit lightweight progress callbacks from stderr output.
+    Run a tart command and emit lightweight progress callbacks from output.
     """
     cmd = ['tart'] + args
     logger.debug("Running with progress: %s", ' '.join(cmd))
@@ -80,31 +80,41 @@ def _run_with_progress(args, timeout=30, progress_cb=None):
         text=False,
     )
 
+    stdout_fd = proc.stdout.fileno() if proc.stdout else None
     stderr_fd = proc.stderr.fileno() if proc.stderr else None
-    if stderr_fd is not None:
-        os.set_blocking(stderr_fd, False)
+    for fd in (stdout_fd, stderr_fd):
+        if fd is not None:
+            os.set_blocking(fd, False)
 
+    stdout_chunks = []
     stderr_chunks = []
-    buffer = ''
+    buffers = {'stdout': '', 'stderr': ''}
     while True:
-        if stderr_fd is not None:
+        for stream_name, fd in (('stdout', stdout_fd), ('stderr', stderr_fd)):
+            if fd is None:
+                continue
             try:
-                chunk = os.read(stderr_fd, 4096)
+                chunk = os.read(fd, 4096)
             except BlockingIOError:
                 chunk = b''
-            if chunk:
-                text = chunk.decode(errors='replace')
+            if not chunk:
+                continue
+            text = chunk.decode(errors='replace')
+            if stream_name == 'stdout':
+                stdout_chunks.append(text)
+            else:
                 stderr_chunks.append(text)
-                buffer += text
-                while True:
-                    separators = [i for i in (buffer.find('\r'), buffer.find('\n')) if i >= 0]
-                    if not separators:
-                        break
-                    idx = min(separators)
-                    line = buffer[:idx].strip()
-                    buffer = buffer[idx + 1:]
-                    if line and progress_cb:
-                        progress_cb(line, _extract_progress(line))
+            buffers[stream_name] += text
+            while True:
+                buffer = buffers[stream_name]
+                separators = [i for i in (buffer.find('\r'), buffer.find('\n')) if i >= 0]
+                if not separators:
+                    break
+                idx = min(separators)
+                line = buffer[:idx].strip()
+                buffers[stream_name] = buffer[idx + 1:]
+                if line and progress_cb:
+                    progress_cb(line, _extract_progress(line))
 
         if proc.poll() is not None:
             break
@@ -119,11 +129,12 @@ def _run_with_progress(args, timeout=30, progress_cb=None):
     else:
         stderr_bytes = b''
 
-    stdout = stdout_bytes.decode(errors='replace').strip()
+    stdout = (''.join(stdout_chunks) + stdout_bytes.decode(errors='replace')).strip()
     stderr = (''.join(stderr_chunks) + stderr_bytes.decode(errors='replace')).strip()
-    if buffer.strip() and progress_cb:
-        line = buffer.strip()
-        progress_cb(line, _extract_progress(line))
+    for remainder in buffers.values():
+        if remainder.strip() and progress_cb:
+            line = remainder.strip()
+            progress_cb(line, _extract_progress(line))
     if proc.returncode != 0:
         raise RuntimeError(f"tart {args[0]} failed: {stderr}")
     return stdout

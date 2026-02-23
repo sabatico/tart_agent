@@ -30,6 +30,9 @@ vnc = vnc_manager.VncManager()
 # In-progress async operation tracker: {vm_name: {op, status, progress, error}}
 _ops = {}
 _ops_lock = threading.Lock()
+_vms_cache = []
+_vms_cache_at = 0.0
+_vms_cache_lock = threading.Lock()
 
 
 def _set_op(name, **fields):
@@ -47,6 +50,34 @@ def _set_op(name, **fields):
                 pass
         current.update(fields)
         _ops[name] = current
+
+
+def _op_is_active(op):
+    status = (op or {}).get('status')
+    return status not in (None, 'done', 'error', 'idle')
+
+
+def _has_active_ops():
+    with _ops_lock:
+        return any(_op_is_active(op) for op in _ops.values())
+
+
+def _get_vms_snapshot():
+    """
+    Return VM list while minimizing Tart lock contention.
+    During active save/restore operations we serve cached data instead of
+    repeatedly calling `tart list` from polling endpoints.
+    """
+    global _vms_cache, _vms_cache_at
+    if _has_active_ops():
+        with _vms_cache_lock:
+            return list(_vms_cache)
+
+    vms = tart_runner.list_vms()
+    with _vms_cache_lock:
+        _vms_cache = list(vms)
+        _vms_cache_at = time.time()
+    return vms
 
 
 def _wait_for_vnc(host, timeout=8, interval=0.4):
@@ -106,7 +137,7 @@ def require_auth():
 
 @app.route('/health')
 def health():
-    vms = tart_runner.list_vms()
+    vms = _get_vms_snapshot()
     running = [
         v for v in vms
         if (v.get('state') or v.get('State') or '').lower() == 'running'
@@ -191,7 +222,7 @@ def _registry_storage_stats():
 
 @app.route('/vms')
 def list_vms():
-    vms = tart_runner.list_vms()
+    vms = _get_vms_snapshot()
     return jsonify(vms)
 
 

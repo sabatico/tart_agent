@@ -85,9 +85,9 @@ def push_vm(name, registry_tag):
     _run(args, timeout=3600)
 
 
-def pull_vm(registry_tag, name):
+def pull_vm(registry_tag):
     """Pull VM disk from registry. Blocking — can take many minutes."""
-    args = ['pull', registry_tag, name]
+    args = ['pull', registry_tag]
     if agent_config.REGISTRY_INSECURE:
         args.append('--insecure')
     _run(args, timeout=3600)

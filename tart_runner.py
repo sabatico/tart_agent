@@ -173,7 +173,14 @@ def push_vm(name, registry_tag):
 
 
 def pull_vm(registry_tag, local_name):
-    """Pull VM disk from registry into the requested local VM name."""
+    """
+    Pull VM image from registry and ensure a local VM with local_name exists.
+
+    Tart CLI behavior differs by version:
+    - `tart pull <remote>` fetches image layers but may not create a local VM.
+    - `tart clone <remote> <local>` creates a runnable local VM (and pulls if needed).
+    This helper handles both cases.
+    """
     preferred_insecure = bool(agent_config.REGISTRY_INSECURE)
     attempts = [preferred_insecure]
     if attempts[0] is True:
@@ -181,9 +188,10 @@ def pull_vm(registry_tag, local_name):
     else:
         attempts.append(True)
 
+    # Stage 1: pull remote image layers.
     last_error = None
     for use_insecure in attempts:
-        args = ['pull', registry_tag, local_name]
+        args = ['pull', registry_tag]
         if use_insecure:
             args.append('--insecure')
         logger.warning(
@@ -194,11 +202,7 @@ def pull_vm(registry_tag, local_name):
         )
         try:
             _run(args, timeout=3600)
-            if not vm_exists(local_name):
-                raise RuntimeError(
-                    f'tart pull completed but local VM "{local_name}" was not found'
-                )
-            return
+            break
         except RuntimeError as e:
             last_error = e
             logger.warning(
@@ -210,7 +214,44 @@ def pull_vm(registry_tag, local_name):
                 e,
             )
             _log_registry_diagnostics(registry_tag)
-    raise RuntimeError(str(last_error))
+    else:
+        raise RuntimeError(str(last_error))
+
+    # If pull already resulted in a local VM with the desired name, we're done.
+    if vm_exists(local_name):
+        return
+
+    # Stage 2: create a local runnable VM name from the remote image.
+    clone_error = None
+    for use_insecure in attempts:
+        args = ['clone', registry_tag, local_name]
+        if use_insecure:
+            args.append('--insecure')
+        logger.warning(
+            "pull_vm(tag=%s, local=%s) local VM missing after pull; running tart %s",
+            registry_tag,
+            local_name,
+            ' '.join(args),
+        )
+        try:
+            _run(args, timeout=3600)
+            if not vm_exists(local_name):
+                raise RuntimeError(
+                    f'tart clone completed but local VM "{local_name}" was not found'
+                )
+            return
+        except RuntimeError as e:
+            clone_error = e
+            logger.warning(
+                "clone fallback failed for tag=%s local=%s insecure=%s: %s",
+                registry_tag,
+                local_name,
+                use_insecure,
+                e,
+            )
+            _log_registry_diagnostics(registry_tag)
+
+    raise RuntimeError(str(clone_error or last_error))
 
 
 def delete_vm(name):

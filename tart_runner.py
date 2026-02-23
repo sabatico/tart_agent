@@ -60,6 +60,27 @@ def _notify_progress(progress_cb, line, parsed):
     progress_cb(payload)
 
 
+def _log_tart_process_snapshot(context):
+    """
+    Log active tart processes to diagnose lock waits.
+    """
+    try:
+        proc = subprocess.run(
+            ['ps', '-ax', '-o', 'pid,ppid,etime,command'],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        lines = [line for line in (proc.stdout or '').splitlines() if 'tart ' in line]
+        if not lines:
+            logger.warning("%s: no active tart processes found in ps snapshot", context)
+            return
+        logger.warning("%s: active tart processes:\n%s", context, '\n'.join(lines[:20]))
+    except Exception as e:
+        logger.warning("%s: failed to capture tart process snapshot: %s", context, e)
+
+
 def _run(args, timeout=30, check=True):
     """Run a tart CLI command. Returns stdout string."""
     cmd = ['tart'] + args
@@ -98,6 +119,8 @@ def _run_with_progress(args, timeout=30, progress_cb=None):
     stdout_chunks = []
     stderr_chunks = []
     buffers = {'stdout': '', 'stderr': ''}
+    lock_wait_started_at = None
+    last_lock_snapshot_at = 0.0
     while True:
         for stream_name, fd in (('stdout', stdout_fd), ('stderr', stderr_fd)):
             if fd is None:
@@ -124,6 +147,17 @@ def _run_with_progress(args, timeout=30, progress_cb=None):
                 buffers[stream_name] = buffer[idx + 1:]
                 if line and progress_cb:
                     progress_cb(line, _extract_progress(line))
+                if line and 'waiting for lock' in line.lower():
+                    now = time.time()
+                    if lock_wait_started_at is None:
+                        lock_wait_started_at = now
+                    wait_secs = int(now - lock_wait_started_at)
+                    # Snapshot tart process tree at first lock wait and every 30s after.
+                    if last_lock_snapshot_at == 0.0 or (now - last_lock_snapshot_at) >= 30:
+                        _log_tart_process_snapshot(
+                            f'tart {" ".join(args[:2])} lock-wait {wait_secs}s'
+                        )
+                        last_lock_snapshot_at = now
 
         if proc.poll() is not None:
             break

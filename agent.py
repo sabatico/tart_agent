@@ -35,6 +35,16 @@ _ops_lock = threading.Lock()
 def _set_op(name, **fields):
     with _ops_lock:
         current = _ops.get(name, {})
+        # If Tart reports only percent but total size is known, derive transferred GB
+        # so UI doesn't get stuck at "0.0 / X GB" while percent advances.
+        if 'progress_pct' in fields and 'transferred_gb' not in fields:
+            total_gb = fields.get('total_gb', current.get('total_gb'))
+            progress_pct = fields.get('progress_pct')
+            try:
+                if total_gb is not None and progress_pct is not None:
+                    fields['transferred_gb'] = round((float(total_gb) * float(progress_pct)) / 100.0, 1)
+            except (TypeError, ValueError):
+                pass
         current.update(fields)
         _ops[name] = current
 

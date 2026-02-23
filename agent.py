@@ -14,6 +14,7 @@ import time
 import json
 import subprocess
 import shutil
+import re
 
 from flask import Flask, jsonify, request, abort
 
@@ -143,6 +144,9 @@ def health():
         if (v.get('state') or v.get('State') or '').lower() == 'running'
     ]
     registry_free_gb, registry_path, registry_probe = _registry_storage_stats()
+    cpu_usage_pct = _cpu_usage_pct()
+    ram_used_gb, ram_total_gb = _ram_usage_gb()
+    net_mbps, net_type, net_if = _network_snapshot()
     return jsonify({
         'status': 'ok',
         'tart_version': _tart_version(),
@@ -154,6 +158,12 @@ def health():
         'registry_free_gb': registry_free_gb,
         'registry_path': registry_path,
         'registry_probe': registry_probe,
+        'cpu_usage_pct': cpu_usage_pct,
+        'ram_used_gb': ram_used_gb,
+        'ram_total_gb': ram_total_gb,
+        'network_mbps': net_mbps,
+        'network_type': net_type,
+        'network_interface': net_if,
     })
 
 
@@ -216,6 +226,169 @@ def _registry_storage_stats():
     # Fallback when registry path cannot be discovered.
     root_stat = shutil.disk_usage('/')
     return round(root_stat.free / 1e9, 1), '/', 'host_root_fallback'
+
+
+def _cpu_usage_pct():
+    """
+    Snapshot overall CPU usage percent from `top` output.
+    """
+    try:
+        proc = subprocess.run(
+            ['top', '-l', '1', '-n', '0'],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        text = (proc.stdout or '') + '\n' + (proc.stderr or '')
+        # Example: "CPU usage: 7.41% user, 8.64% sys, 83.94% idle"
+        m = re.search(r'CPU usage:\s*[\d.]+%\s*user,\s*[\d.]+%\s*sys,\s*([\d.]+)%\s*idle', text)
+        if not m:
+            return None
+        idle = float(m.group(1))
+        return round(max(0.0, min(100.0, 100.0 - idle)), 1)
+    except Exception:
+        return None
+
+
+def _ram_usage_gb():
+    """
+    Snapshot RAM used/total in GB using vm_stat + hw.memsize.
+    """
+    try:
+        page_size = 4096
+        vm = subprocess.run(
+            ['vm_stat'],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        vm_out = vm.stdout or ''
+        m = re.search(r'page size of (\d+) bytes', vm_out)
+        if m:
+            page_size = int(m.group(1))
+        values = {}
+        for key, value in re.findall(r'^([^:]+):\s+(\d+)\.', vm_out, flags=re.MULTILINE):
+            values[key.strip()] = int(value)
+
+        # Treat active/wired/compressed as used snapshot.
+        used_pages = (
+            values.get('Pages active', 0)
+            + values.get('Pages wired down', 0)
+            + values.get('Pages occupied by compressor', 0)
+        )
+        used_bytes = used_pages * page_size
+
+        memsize = subprocess.run(
+            ['sysctl', '-n', 'hw.memsize'],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        total_bytes = int((memsize.stdout or '0').strip() or 0)
+        if total_bytes <= 0:
+            return None, None
+        used_gb = round(used_bytes / (1024 ** 3), 1)
+        total_gb = round(total_bytes / (1024 ** 3), 1)
+        return used_gb, total_gb
+    except Exception:
+        return None, None
+
+
+def _default_interface():
+    try:
+        proc = subprocess.run(
+            ['route', '-n', 'get', 'default'],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        m = re.search(r'interface:\s+(\S+)', proc.stdout or '')
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def _interface_type(ifname):
+    if not ifname:
+        return None
+    # Best-effort mapping from hardware ports.
+    try:
+        proc = subprocess.run(
+            ['networksetup', '-listallhardwareports'],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+        )
+        blocks = (proc.stdout or '').split('\n\n')
+        for block in blocks:
+            if f'Device: {ifname}' not in block:
+                continue
+            if 'Hardware Port: Wi-Fi' in block:
+                return 'Wifi'
+            if 'Hardware Port: Ethernet' in block:
+                return 'Eth'
+            m = re.search(r'Hardware Port:\s*(.+)', block)
+            if m:
+                return m.group(1).strip()
+    except Exception:
+        pass
+    return ifname
+
+
+def _interface_bytes(ifname):
+    if not ifname:
+        return None
+    try:
+        proc = subprocess.run(
+            ['netstat', '-ibn'],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        rx = 0
+        tx = 0
+        for line in (proc.stdout or '').splitlines():
+            parts = line.split()
+            if len(parts) < 10 or parts[0] != ifname:
+                continue
+            # Format: Name Mtu Network Address Ipkts Ierrs Opkts Oerrs Coll Drop Ibytes Obytes
+            try:
+                ib = int(parts[-2])
+                ob = int(parts[-1])
+            except (ValueError, IndexError):
+                continue
+            rx = max(rx, ib)
+            tx = max(tx, ob)
+        if rx == 0 and tx == 0:
+            return None
+        return rx + tx
+    except Exception:
+        return None
+
+
+def _network_snapshot():
+    """
+    Snapshot network throughput over ~1s on default interface.
+    Returns (mbps, type_label, interface_name).
+    """
+    ifname = _default_interface()
+    iface_type = _interface_type(ifname)
+    first = _interface_bytes(ifname)
+    if first is None:
+        return None, iface_type, ifname
+    time.sleep(1.0)
+    second = _interface_bytes(ifname)
+    if second is None or second < first:
+        return None, iface_type, ifname
+    delta_bytes = second - first
+    mbps = round((delta_bytes * 8.0) / 1_000_000.0, 1)
+    return mbps, iface_type, ifname
 
 
 # ── VM list ────────────────────────────────────────────────────────────────────

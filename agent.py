@@ -243,22 +243,23 @@ def save_vm(name):
             progress_pct=0,
             transferred_gb=0.0,
             total_gb=expected_disk_gb,
+            last_progress_line='Preparing save operation...',
             error=None,
         )
         try:
             tart_runner.stop_vm(name)
-            _set_op(name, status='pushing')
+            _set_op(name, status='pushing', last_progress_line='Starting registry push...')
             tart_runner.push_vm(
                 name,
                 registry_tag,
                 progress_cb=lambda update: _set_op(name, **update),
             )
-            _set_op(name, status='deleting')
+            _set_op(name, status='deleting', last_progress_line='Cleaning local VM after push...')
             tart_runner.delete_vm(name)
-            _set_op(name, status='done', progress_pct=100)
+            _set_op(name, status='done', progress_pct=100, last_progress_line='Save completed.')
         except Exception as e:
             logger.error("save_vm(%s) async error: %s", name, e)
-            _set_op(name, op='save', status='error', error=str(e))
+            _set_op(name, op='save', status='error', error=str(e), last_progress_line='Save failed.')
 
     threading.Thread(target=_do_save, daemon=True).start()
     return jsonify({'status': 'saving', 'poll': f'/vms/{name}/op'})
@@ -279,6 +280,7 @@ def restore_vm(name):
             progress_pct=0,
             transferred_gb=0.0,
             total_gb=expected_disk_gb,
+            last_progress_line='Preparing restore operation...',
             error=None,
         )
         try:
@@ -287,12 +289,12 @@ def restore_vm(name):
                 name,
                 progress_cb=lambda update: _set_op(name, **update),
             )
-            _set_op(name, status='starting')
+            _set_op(name, status='starting', last_progress_line='Starting VM after transfer...')
             tart_runner.start_vm(name)
-            _set_op(name, status='done', progress_pct=100)
+            _set_op(name, status='done', progress_pct=100, last_progress_line='Restore completed.')
         except Exception as e:
             logger.error("restore_vm(%s) async error: %s", name, e)
-            _set_op(name, op='restore', status='error', error=str(e))
+            _set_op(name, op='restore', status='error', error=str(e), last_progress_line='Restore failed.')
 
     threading.Thread(target=_do_restore, daemon=True).start()
     return jsonify({'status': 'restoring', 'poll': f'/vms/{name}/op'})

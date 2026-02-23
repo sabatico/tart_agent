@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 _TRANSFER_RE = re.compile(
-    r'(?P<current>\d+(?:\.\d+)?)\s*(?P<cur_unit>GiB|GB|MiB|MB)\s*/\s*'
+    r'(?P<current>\d+(?:\.\d+)?)\s*(?P<cur_unit>GiB|GB|MiB|MB)\s*'
+    r'(?:/|of)\s*'
     r'(?P<total>\d+(?:\.\d+)?)\s*(?P<tot_unit>GiB|GB|MiB|MB)',
     re.IGNORECASE,
 )
@@ -49,6 +50,14 @@ def _extract_progress(text):
     if percent and 'progress_pct' not in payload:
         payload['progress_pct'] = max(0, min(100, int(percent.group('pct'))))
     return payload
+
+
+def _notify_progress(progress_cb, line, parsed):
+    if not progress_cb:
+        return
+    payload = {'last_progress_line': (line or '').strip()[:300]}
+    payload.update(parsed or {})
+    progress_cb(payload)
 
 
 def _run(args, timeout=30, check=True):
@@ -266,8 +275,8 @@ def push_vm(name, registry_tag, progress_cb=None):
         attempts.append(True)
 
     def _progress(line, parsed):
-        if progress_cb and parsed:
-            progress_cb(parsed)
+        logger.info("push_vm(%s) progress: %s", name, line)
+        _notify_progress(progress_cb, line, parsed)
 
     last_error = None
     for use_insecure in attempts:
@@ -301,8 +310,8 @@ def pull_vm(registry_tag, local_name, progress_cb=None):
     This helper handles both cases.
     """
     def _progress(line, parsed):
-        if progress_cb and parsed:
-            progress_cb(parsed)
+        logger.info("pull_vm(%s) progress: %s", local_name, line)
+        _notify_progress(progress_cb, line, parsed)
 
     preferred_insecure = bool(agent_config.REGISTRY_INSECURE)
     attempts = [preferred_insecure]
@@ -345,6 +354,11 @@ def pull_vm(registry_tag, local_name, progress_cb=None):
         return
 
     # Stage 2: create a local runnable VM name from the remote image.
+    _notify_progress(
+        progress_cb,
+        f'Pull complete, local VM "{local_name}" missing. Falling back to clone.',
+        {'status': 'cloning'},
+    )
     clone_error = None
     for use_insecure in attempts:
         args = ['clone', registry_tag, local_name]

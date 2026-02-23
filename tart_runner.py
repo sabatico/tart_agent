@@ -2,6 +2,8 @@ import json
 import logging
 import subprocess
 import time
+import socket
+from urllib.parse import urlparse
 import agent_config
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,56 @@ def _run(args, timeout=30, check=True):
     if check and result.returncode != 0:
         raise RuntimeError(f"tart {args[0]} failed: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def _registry_host_port_from_tag(registry_tag):
+    first = (registry_tag or '').split('/', 1)[0].strip()
+    if not first:
+        return None, None
+    parsed = urlparse(f'//{first}')
+    host = parsed.hostname
+    port = parsed.port or 443
+    return host, port
+
+
+def _log_registry_diagnostics(registry_tag):
+    host, port = _registry_host_port_from_tag(registry_tag)
+    if not host:
+        logger.warning("Registry diagnostics skipped: could not parse host from tag=%r", registry_tag)
+        return
+
+    logger.warning("Registry diagnostics: host=%s port=%s tag=%s", host, port, registry_tag)
+
+    # DNS resolution diagnostics.
+    try:
+        addrinfo = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        resolved = sorted({entry[4][0] for entry in addrinfo if entry and entry[4]})
+        logger.warning("Registry diagnostics: resolved addresses=%s", resolved)
+    except OSError as e:
+        logger.warning("Registry diagnostics: DNS resolution failed for %s:%s: %s", host, port, e)
+
+    # TCP connectivity diagnostics.
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            logger.warning("Registry diagnostics: TCP connect to %s:%s succeeded", host, port)
+    except OSError as e:
+        logger.warning("Registry diagnostics: TCP connect to %s:%s failed: %s", host, port, e)
+
+    # HTTP registry endpoint diagnostics.
+    http_url = f'http://{host}:{port}/v2/'
+    try:
+        probe = subprocess.run(
+            ['curl', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '5', http_url],
+            capture_output=True,
+            text=True,
+            timeout=7,
+            check=False,
+        )
+        code = (probe.stdout or '').strip()
+        err = (probe.stderr or '').strip()
+        logger.warning("Registry diagnostics: curl %s -> http_code=%s stderr=%r", http_url, code, err)
+    except Exception as e:
+        logger.warning("Registry diagnostics: curl probe failed for %s: %s", http_url, e)
 
 
 def list_vms():
@@ -91,6 +143,7 @@ def push_vm(name, registry_tag):
         args = ['push', name, registry_tag]
         if use_insecure:
             args.append('--insecure')
+        logger.warning("push_vm(%s) running command: tart %s", name, ' '.join(args))
         try:
             _run(args, timeout=3600)
             return
@@ -103,6 +156,7 @@ def push_vm(name, registry_tag):
                 '' if use_insecure != attempts[-1] else 'not ',
                 e,
             )
+            _log_registry_diagnostics(registry_tag)
     raise RuntimeError(str(last_error))
 
 
@@ -120,6 +174,7 @@ def pull_vm(registry_tag):
         args = ['pull', registry_tag]
         if use_insecure:
             args.append('--insecure')
+        logger.warning("pull_vm(%s) running command: tart %s", registry_tag, ' '.join(args))
         try:
             _run(args, timeout=3600)
             return
@@ -132,6 +187,7 @@ def pull_vm(registry_tag):
                 '' if use_insecure != attempts[-1] else 'not ',
                 e,
             )
+            _log_registry_diagnostics(registry_tag)
     raise RuntimeError(str(last_error))
 
 

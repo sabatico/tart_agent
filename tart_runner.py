@@ -172,8 +172,8 @@ def push_vm(name, registry_tag):
     raise RuntimeError(str(last_error))
 
 
-def pull_vm(registry_tag):
-    """Pull VM disk from registry. Blocking — can take many minutes."""
+def pull_vm(registry_tag, local_name):
+    """Pull VM disk from registry into the requested local VM name."""
     preferred_insecure = bool(agent_config.REGISTRY_INSECURE)
     attempts = [preferred_insecure]
     if attempts[0] is True:
@@ -183,18 +183,28 @@ def pull_vm(registry_tag):
 
     last_error = None
     for use_insecure in attempts:
-        args = ['pull', registry_tag]
+        args = ['pull', registry_tag, local_name]
         if use_insecure:
             args.append('--insecure')
-        logger.warning("pull_vm(%s) running command: tart %s", registry_tag, ' '.join(args))
+        logger.warning(
+            "pull_vm(tag=%s, local=%s) running command: tart %s",
+            registry_tag,
+            local_name,
+            ' '.join(args),
+        )
         try:
             _run(args, timeout=3600)
+            if not vm_exists(local_name):
+                raise RuntimeError(
+                    f'tart pull completed but local VM "{local_name}" was not found'
+                )
             return
         except RuntimeError as e:
             last_error = e
             logger.warning(
-                "pull_vm(%s) failed with insecure=%s, will %sretry: %s",
+                "pull_vm(tag=%s, local=%s) failed with insecure=%s, will %sretry: %s",
                 registry_tag,
+                local_name,
                 use_insecure,
                 '' if use_insecure != attempts[-1] else 'not ',
                 e,

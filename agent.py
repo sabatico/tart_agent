@@ -249,7 +249,7 @@ def restore_vm(name):
         with _ops_lock:
             _ops[name] = {'op': 'restore', 'status': 'pulling', 'progress': 0, 'error': None}
         try:
-            tart_runner.pull_vm(registry_tag)
+            tart_runner.pull_vm(registry_tag, name)
             with _ops_lock:
                 _ops[name]['status'] = 'starting'
             tart_runner.start_vm(name)

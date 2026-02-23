@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import time
 import socket
@@ -79,6 +80,67 @@ def _log_tart_process_snapshot(context):
         logger.warning("%s: active tart processes:\n%s", context, '\n'.join(lines[:20]))
     except Exception as e:
         logger.warning("%s: failed to capture tart process snapshot: %s", context, e)
+
+
+def _kill_stale_tart_pulls(registry_tag):
+    """
+    Find and SIGTERM any existing `tart pull <registry_tag>` processes.
+    Orphaned pulls from prior failed/abandoned attempts hold Tart's per-image
+    file lock and block new pulls indefinitely.  We kill them before each new
+    pull attempt so the lock is released immediately.
+    """
+    current_pid = os.getpid()
+    killed_pids = []
+    try:
+        proc = subprocess.run(
+            ['ps', '-ax', '-o', 'pid=,command='],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        for line in (proc.stdout or '').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            cmd = parts[1]
+            if pid == current_pid:
+                continue
+            if 'tart' in cmd and 'pull' in cmd and registry_tag in cmd:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    killed_pids.append(pid)
+                    logger.warning(
+                        "kill_stale_tart_pulls: SIGTERM → pid=%d  cmd=%r",
+                        pid,
+                        cmd[:120],
+                    )
+                except ProcessLookupError:
+                    pass  # already gone
+                except PermissionError:
+                    logger.warning(
+                        "kill_stale_tart_pulls: no permission to kill pid=%d", pid
+                    )
+    except Exception as e:
+        logger.warning("kill_stale_tart_pulls: error scanning processes: %s", e)
+
+    if killed_pids:
+        logger.warning(
+            "kill_stale_tart_pulls: killed %d stale pull(s) %s — sleeping 2s for lock release",
+            len(killed_pids),
+            killed_pids,
+        )
+        time.sleep(2)
+    else:
+        logger.info("kill_stale_tart_pulls: no stale pulls found for %s", registry_tag)
+    return killed_pids
 
 
 def _run(args, timeout=30, check=True):
@@ -353,6 +415,9 @@ def pull_vm(registry_tag, local_name, progress_cb=None):
         attempts.append(False)
     else:
         attempts.append(True)
+
+    # Kill any orphaned tart pull processes for this tag that hold the image lock.
+    _kill_stale_tart_pulls(registry_tag)
 
     # Stage 1: pull remote image layers.
     last_error = None

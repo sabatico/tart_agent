@@ -79,18 +79,60 @@ def stop_vm(name, timeout=60):
 
 def push_vm(name, registry_tag):
     """Push VM disk to registry. Blocking — can take many minutes."""
-    args = ['push', name, registry_tag]
-    if agent_config.REGISTRY_INSECURE:
-        args.append('--insecure')
-    _run(args, timeout=3600)
+    preferred_insecure = bool(agent_config.REGISTRY_INSECURE)
+    attempts = [preferred_insecure]
+    if attempts[0] is True:
+        attempts.append(False)
+    else:
+        attempts.append(True)
+
+    last_error = None
+    for use_insecure in attempts:
+        args = ['push', name, registry_tag]
+        if use_insecure:
+            args.append('--insecure')
+        try:
+            _run(args, timeout=3600)
+            return
+        except RuntimeError as e:
+            last_error = e
+            logger.warning(
+                "push_vm(%s) failed with insecure=%s, will %sretry: %s",
+                name,
+                use_insecure,
+                '' if use_insecure != attempts[-1] else 'not ',
+                e,
+            )
+    raise RuntimeError(str(last_error))
 
 
 def pull_vm(registry_tag):
     """Pull VM disk from registry. Blocking — can take many minutes."""
-    args = ['pull', registry_tag]
-    if agent_config.REGISTRY_INSECURE:
-        args.append('--insecure')
-    _run(args, timeout=3600)
+    preferred_insecure = bool(agent_config.REGISTRY_INSECURE)
+    attempts = [preferred_insecure]
+    if attempts[0] is True:
+        attempts.append(False)
+    else:
+        attempts.append(True)
+
+    last_error = None
+    for use_insecure in attempts:
+        args = ['pull', registry_tag]
+        if use_insecure:
+            args.append('--insecure')
+        try:
+            _run(args, timeout=3600)
+            return
+        except RuntimeError as e:
+            last_error = e
+            logger.warning(
+                "pull_vm(%s) failed with insecure=%s, will %sretry: %s",
+                registry_tag,
+                use_insecure,
+                '' if use_insecure != attempts[-1] else 'not ',
+                e,
+            )
+    raise RuntimeError(str(last_error))
 
 
 def delete_vm(name):

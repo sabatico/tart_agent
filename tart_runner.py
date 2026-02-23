@@ -62,7 +62,19 @@ def _log_registry_diagnostics(registry_tag):
     http_url = f'http://{host}:{port}/v2/'
     try:
         probe = subprocess.run(
-            ['curl', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '5', http_url],
+            [
+                'curl',
+                '--noproxy',
+                '*',
+                '-sS',
+                '-o',
+                '/dev/null',
+                '-w',
+                '%{http_code}',
+                '--max-time',
+                '5',
+                http_url,
+            ],
             capture_output=True,
             text=True,
             timeout=7,

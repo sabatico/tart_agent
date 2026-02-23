@@ -81,6 +81,13 @@ cd /Users/Shared/TART_Agent
 ./run.sh
 ```
 
+`run.sh` now auto-recovers stale previous agent processes on the same port (`7000` by default).
+If you prefer strict behavior (do not auto-stop existing process), run with:
+
+```bash
+AUTO_STOP_EXISTING=false ./run.sh
+```
+
 ## Endpoints
 
 | Method | Path | Description |

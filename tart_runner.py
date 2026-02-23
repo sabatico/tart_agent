@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import re
 import subprocess
 import time
 import socket
@@ -7,6 +9,46 @@ from urllib.parse import urlparse
 import agent_config
 
 logger = logging.getLogger(__name__)
+
+
+_TRANSFER_RE = re.compile(
+    r'(?P<current>\d+(?:\.\d+)?)\s*(?P<cur_unit>GiB|GB|MiB|MB)\s*/\s*'
+    r'(?P<total>\d+(?:\.\d+)?)\s*(?P<tot_unit>GiB|GB|MiB|MB)',
+    re.IGNORECASE,
+)
+_PERCENT_RE = re.compile(r'(?P<pct>\d{1,3})\s*%')
+
+
+def _to_gb(value, unit):
+    unit_l = (unit or '').lower()
+    if unit_l in ('gib', 'gb'):
+        return float(value)
+    if unit_l in ('mib', 'mb'):
+        return float(value) / 1024.0
+    return float(value)
+
+
+def _extract_progress(text):
+    payload = {}
+    if not text:
+        return payload
+    transfer = _TRANSFER_RE.search(text)
+    if transfer:
+        payload['transferred_gb'] = round(
+            _to_gb(transfer.group('current'), transfer.group('cur_unit')), 1
+        )
+        payload['total_gb'] = round(
+            _to_gb(transfer.group('total'), transfer.group('tot_unit')), 1
+        )
+        if payload['total_gb'] > 0:
+            payload['progress_pct'] = max(
+                0,
+                min(100, int(round((payload['transferred_gb'] / payload['total_gb']) * 100))),
+            )
+    percent = _PERCENT_RE.search(text)
+    if percent and 'progress_pct' not in payload:
+        payload['progress_pct'] = max(0, min(100, int(percent.group('pct'))))
+    return payload
 
 
 def _run(args, timeout=30, check=True):
@@ -23,6 +65,68 @@ def _run(args, timeout=30, check=True):
     if check and result.returncode != 0:
         raise RuntimeError(f"tart {args[0]} failed: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def _run_with_progress(args, timeout=30, progress_cb=None):
+    """
+    Run a tart command and emit lightweight progress callbacks from stderr output.
+    """
+    cmd = ['tart'] + args
+    logger.debug("Running with progress: %s", ' '.join(cmd))
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+    )
+
+    stderr_fd = proc.stderr.fileno() if proc.stderr else None
+    if stderr_fd is not None:
+        os.set_blocking(stderr_fd, False)
+
+    stderr_chunks = []
+    buffer = ''
+    while True:
+        if stderr_fd is not None:
+            try:
+                chunk = os.read(stderr_fd, 4096)
+            except BlockingIOError:
+                chunk = b''
+            if chunk:
+                text = chunk.decode(errors='replace')
+                stderr_chunks.append(text)
+                buffer += text
+                while True:
+                    separators = [i for i in (buffer.find('\r'), buffer.find('\n')) if i >= 0]
+                    if not separators:
+                        break
+                    idx = min(separators)
+                    line = buffer[:idx].strip()
+                    buffer = buffer[idx + 1:]
+                    if line and progress_cb:
+                        progress_cb(line, _extract_progress(line))
+
+        if proc.poll() is not None:
+            break
+        time.sleep(0.2)
+
+    if proc.stdout:
+        stdout_bytes = proc.stdout.read() or b''
+    else:
+        stdout_bytes = b''
+    if proc.stderr:
+        stderr_bytes = proc.stderr.read() or b''
+    else:
+        stderr_bytes = b''
+
+    stdout = stdout_bytes.decode(errors='replace').strip()
+    stderr = (''.join(stderr_chunks) + stderr_bytes.decode(errors='replace')).strip()
+    if buffer.strip() and progress_cb:
+        line = buffer.strip()
+        progress_cb(line, _extract_progress(line))
+    if proc.returncode != 0:
+        raise RuntimeError(f"tart {args[0]} failed: {stderr}")
+    return stdout
 
 
 def _registry_host_port_from_tag(registry_tag):
@@ -141,7 +245,7 @@ def stop_vm(name, timeout=60):
     return False  # timed out
 
 
-def push_vm(name, registry_tag):
+def push_vm(name, registry_tag, progress_cb=None):
     """Push VM disk to registry. Blocking — can take many minutes."""
     preferred_insecure = bool(agent_config.REGISTRY_INSECURE)
     attempts = [preferred_insecure]
@@ -150,6 +254,10 @@ def push_vm(name, registry_tag):
     else:
         attempts.append(True)
 
+    def _progress(line, parsed):
+        if progress_cb and parsed:
+            progress_cb(parsed)
+
     last_error = None
     for use_insecure in attempts:
         args = ['push', name, registry_tag]
@@ -157,7 +265,7 @@ def push_vm(name, registry_tag):
             args.append('--insecure')
         logger.warning("push_vm(%s) running command: tart %s", name, ' '.join(args))
         try:
-            _run(args, timeout=3600)
+            _run_with_progress(args, timeout=3600, progress_cb=_progress if progress_cb else None)
             return
         except RuntimeError as e:
             last_error = e
@@ -172,7 +280,7 @@ def push_vm(name, registry_tag):
     raise RuntimeError(str(last_error))
 
 
-def pull_vm(registry_tag, local_name):
+def pull_vm(registry_tag, local_name, progress_cb=None):
     """
     Pull VM image from registry and ensure a local VM with local_name exists.
 
@@ -181,6 +289,10 @@ def pull_vm(registry_tag, local_name):
     - `tart clone <remote> <local>` creates a runnable local VM (and pulls if needed).
     This helper handles both cases.
     """
+    def _progress(line, parsed):
+        if progress_cb and parsed:
+            progress_cb(parsed)
+
     preferred_insecure = bool(agent_config.REGISTRY_INSECURE)
     attempts = [preferred_insecure]
     if attempts[0] is True:
@@ -201,7 +313,7 @@ def pull_vm(registry_tag, local_name):
             ' '.join(args),
         )
         try:
-            _run(args, timeout=3600)
+            _run_with_progress(args, timeout=3600, progress_cb=_progress if progress_cb else None)
             break
         except RuntimeError as e:
             last_error = e
@@ -234,7 +346,7 @@ def pull_vm(registry_tag, local_name):
             ' '.join(args),
         )
         try:
-            _run(args, timeout=3600)
+            _run_with_progress(args, timeout=3600, progress_cb=_progress if progress_cb else None)
             if not vm_exists(local_name):
                 raise RuntimeError(
                     f'tart clone completed but local VM "{local_name}" was not found'

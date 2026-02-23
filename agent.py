@@ -32,6 +32,13 @@ _ops = {}
 _ops_lock = threading.Lock()
 
 
+def _set_op(name, **fields):
+    with _ops_lock:
+        current = _ops.get(name, {})
+        current.update(fields)
+        _ops[name] = current
+
+
 def _wait_for_vnc(host, timeout=8, interval=0.4):
     """Wait until VNC port is reachable from the agent host."""
     deadline = time.time() + timeout
@@ -216,24 +223,32 @@ def save_vm(name):
     """Shutdown + push to registry (async). Poll /vms/<name>/op for progress."""
     data = request.json
     registry_tag = data['registry_tag']
+    expected_disk_gb = data.get('expected_disk_gb')
 
     def _do_save():
-        with _ops_lock:
-            _ops[name] = {'op': 'save', 'status': 'stopping', 'progress': 0, 'error': None}
+        _set_op(
+            name,
+            op='save',
+            status='stopping',
+            progress_pct=0,
+            transferred_gb=0.0,
+            total_gb=expected_disk_gb,
+            error=None,
+        )
         try:
             tart_runner.stop_vm(name)
-            with _ops_lock:
-                _ops[name]['status'] = 'pushing'
-            tart_runner.push_vm(name, registry_tag)
-            with _ops_lock:
-                _ops[name]['status'] = 'deleting'
+            _set_op(name, status='pushing')
+            tart_runner.push_vm(
+                name,
+                registry_tag,
+                progress_cb=lambda update: _set_op(name, **update),
+            )
+            _set_op(name, status='deleting')
             tart_runner.delete_vm(name)
-            with _ops_lock:
-                _ops[name]['status'] = 'done'
+            _set_op(name, status='done', progress_pct=100)
         except Exception as e:
             logger.error("save_vm(%s) async error: %s", name, e)
-            with _ops_lock:
-                _ops[name] = {'op': 'save', 'status': 'error', 'error': str(e)}
+            _set_op(name, op='save', status='error', error=str(e))
 
     threading.Thread(target=_do_save, daemon=True).start()
     return jsonify({'status': 'saving', 'poll': f'/vms/{name}/op'})
@@ -244,21 +259,30 @@ def restore_vm(name):
     """Pull from registry + start (async). Poll /vms/<name>/op for progress."""
     data = request.json
     registry_tag = data['registry_tag']
+    expected_disk_gb = data.get('expected_disk_gb')
 
     def _do_restore():
-        with _ops_lock:
-            _ops[name] = {'op': 'restore', 'status': 'pulling', 'progress': 0, 'error': None}
+        _set_op(
+            name,
+            op='restore',
+            status='pulling',
+            progress_pct=0,
+            transferred_gb=0.0,
+            total_gb=expected_disk_gb,
+            error=None,
+        )
         try:
-            tart_runner.pull_vm(registry_tag, name)
-            with _ops_lock:
-                _ops[name]['status'] = 'starting'
+            tart_runner.pull_vm(
+                registry_tag,
+                name,
+                progress_cb=lambda update: _set_op(name, **update),
+            )
+            _set_op(name, status='starting')
             tart_runner.start_vm(name)
-            with _ops_lock:
-                _ops[name]['status'] = 'done'
+            _set_op(name, status='done', progress_pct=100)
         except Exception as e:
             logger.error("restore_vm(%s) async error: %s", name, e)
-            with _ops_lock:
-                _ops[name] = {'op': 'restore', 'status': 'error', 'error': str(e)}
+            _set_op(name, op='restore', status='error', error=str(e))
 
     threading.Thread(target=_do_restore, daemon=True).start()
     return jsonify({'status': 'restoring', 'poll': f'/vms/{name}/op'})

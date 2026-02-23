@@ -11,6 +11,9 @@ import logging
 import socket
 import threading
 import time
+import json
+import subprocess
+import shutil
 
 from flask import Flask, jsonify, request, abort
 
@@ -91,6 +94,7 @@ def health():
         v for v in vms
         if (v.get('state') or v.get('State') or '').lower() == 'running'
     ]
+    registry_free_gb, registry_path, registry_probe = _registry_storage_stats()
     return jsonify({
         'status': 'ok',
         'tart_version': _tart_version(),
@@ -99,6 +103,9 @@ def health():
         'free_slots': max(0, agent_config.MAX_VMS - len(running)),
         'all_vms': len(vms),
         'disk_free_gb': _disk_free_gb(),
+        'registry_free_gb': registry_free_gb,
+        'registry_path': registry_path,
+        'registry_probe': registry_probe,
     })
 
 
@@ -114,11 +121,53 @@ def _tart_version():
 
 def _disk_free_gb():
     try:
-        import shutil
         stat = shutil.disk_usage('/')
         return round(stat.free / 1e9, 1)
     except Exception:
         return None
+
+
+def _registry_storage_stats():
+    """
+    Return registry backing storage free space in GB and path metadata.
+    Preference order:
+    1) REGISTRY_DATA_DIR env override
+    2) Docker inspect mount source for REGISTRY_CONTAINER_NAME
+    3) host root fallback
+    """
+    # Explicit override is best when known.
+    if agent_config.REGISTRY_DATA_DIR:
+        try:
+            stat = shutil.disk_usage(agent_config.REGISTRY_DATA_DIR)
+            return round(stat.free / 1e9, 1), agent_config.REGISTRY_DATA_DIR, 'env_registry_data_dir'
+        except Exception:
+            pass
+
+    # Try to discover the host mount path from Docker container metadata.
+    try:
+        result = subprocess.run(
+            ['docker', 'inspect', agent_config.REGISTRY_CONTAINER_NAME],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            payload = json.loads(result.stdout)
+            if payload:
+                mounts = payload[0].get('Mounts', []) or []
+                for mount in mounts:
+                    destination = (mount.get('Destination') or '').strip()
+                    source = (mount.get('Source') or '').strip()
+                    if destination == '/var/lib/registry' and source:
+                        stat = shutil.disk_usage(source)
+                        return round(stat.free / 1e9, 1), source, 'docker_inspect_mount'
+    except Exception:
+        pass
+
+    # Fallback when registry path cannot be discovered.
+    root_stat = shutil.disk_usage('/')
+    return round(root_stat.free / 1e9, 1), '/', 'host_root_fallback'
 
 
 # ── VM list ────────────────────────────────────────────────────────────────────

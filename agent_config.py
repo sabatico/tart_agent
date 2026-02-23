@@ -12,6 +12,11 @@ AGENT_TOKEN = os.environ.get('AGENT_TOKEN', '')  # must match Flask server confi
 REGISTRY_URL = os.environ.get('REGISTRY_URL', 'registry.local:5001')
 # Set true for plain-HTTP LAN registry endpoints.
 REGISTRY_INSECURE = _env_bool('REGISTRY_INSECURE', True)
+# Optional explicit host path used by Docker registry data volume.
+# Example: /Users/Shared/tart-registry
+REGISTRY_DATA_DIR = os.environ.get('REGISTRY_DATA_DIR', '').strip()
+# Docker registry container name used for auto mount-source discovery.
+REGISTRY_CONTAINER_NAME = os.environ.get('REGISTRY_CONTAINER_NAME', 'tart-registry').strip()
 TART_BIN = os.environ.get('TART_BIN', 'tart')
 WEBSOCKIFY_BIN = os.environ.get('WEBSOCKIFY_BIN', 'websockify')
 VNC_PORT = int(os.environ.get('VNC_PORT', 5900))

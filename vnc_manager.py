@@ -6,12 +6,25 @@ One websockify process per running VM that needs a console.
 import logging
 import socket
 import subprocess
+import sys
 import threading
 import time
 
 import agent_config
 
 logger = logging.getLogger(__name__)
+
+
+def _websockify_cmd(port, target):
+    """
+    Build the websockify command. Uses the same Python that runs the agent
+    (python -m websockify) so we don't depend on PATH. Override with
+    WEBSOCKIFY_BIN if set to an explicit path (contains '/').
+    """
+    bin_cfg = agent_config.WEBSOCKIFY_BIN
+    if bin_cfg and '/' in bin_cfg:
+        return [bin_cfg, str(port), target]
+    return [sys.executable, '-m', 'websockify', str(port), target]
 
 
 class VncManager:
@@ -59,7 +72,7 @@ class VncManager:
 
         port = self._find_free_port()
         target = f'{target_host}:{agent_config.VNC_PORT}'
-        cmd = [agent_config.WEBSOCKIFY_BIN, str(port), target]
+        cmd = _websockify_cmd(port, target)
 
         logger.info("Starting websockify: port %d → %s (vm=%s)", port, target, vm_name)
         try:
@@ -70,12 +83,19 @@ class VncManager:
             )
         except FileNotFoundError:
             raise RuntimeError(
-                f"websockify binary not found at '{agent_config.WEBSOCKIFY_BIN}'"
+                f"websockify not found (cmd={cmd}). "
+                "Ensure websockify is installed: pip install websockify"
             )
 
         time.sleep(0.3)
         if proc.poll() is not None:
             stderr = proc.stderr.read().decode() if proc.stderr else ''
+            logger.error(
+                "websockify failed to start for %s (exit %s): %s",
+                vm_name,
+                proc.returncode,
+                stderr or '(no stderr)',
+            )
             raise RuntimeError(f"websockify failed to start for {vm_name}: {stderr}")
 
         def _drain_stderr():

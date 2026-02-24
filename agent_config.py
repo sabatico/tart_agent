@@ -18,6 +18,8 @@ REGISTRY_DATA_DIR = os.environ.get('REGISTRY_DATA_DIR', '').strip()
 # Docker registry container name used for auto mount-source discovery.
 REGISTRY_CONTAINER_NAME = os.environ.get('REGISTRY_CONTAINER_NAME', 'tart-registry').strip()
 TART_BIN = os.environ.get('TART_BIN', 'tart')
+# Default: use same Python as agent (python -m websockify), no PATH needed.
+# Override with full path, e.g. WEBSOCKIFY_BIN=/path/to/websockify
 WEBSOCKIFY_BIN = os.environ.get('WEBSOCKIFY_BIN', 'websockify')
 VNC_PORT = int(os.environ.get('VNC_PORT', 5900))
 # VNC target strategy:

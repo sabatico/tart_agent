@@ -15,6 +15,7 @@ import json
 import subprocess
 import shutil
 import re
+import traceback
 
 from flask import Flask, jsonify, request, abort
 
@@ -642,8 +643,18 @@ def vnc_start(name):
             selected_banner,
             port,
         )
-        return jsonify({'port': port})
+        return jsonify({'port': port, 'vnc_port': agent_config.VNC_PORT})
     except RuntimeError as e:
+        logger.error("vnc_start(%s) RuntimeError: %s", name, e, exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    except Exception as e:
+        logger.error(
+            "vnc_start(%s) unexpected error: %s\n%s",
+            name,
+            e,
+            traceback.format_exc(),
+            exc_info=True,
+        )
         return jsonify({'error': str(e)}), 500
 
 

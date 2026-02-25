@@ -490,6 +490,50 @@ def pull_vm(registry_tag, local_name, progress_cb=None):
     raise RuntimeError(str(clone_error or last_error))
 
 
+def pull_image_only(registry_tag, progress_cb=None):
+    """
+    Pull a remote OCI image into Tart's cache without cloning a local VM.
+    Used for pre-caching gold images on all nodes.
+    """
+    def _progress(line, parsed):
+        logger.info("pull_image_only(%s) progress: %s", registry_tag, line)
+        _notify_progress(progress_cb, line, parsed)
+
+    preferred_insecure = bool(agent_config.REGISTRY_INSECURE)
+    attempts = [preferred_insecure]
+    if attempts[0] is True:
+        attempts.append(False)
+    else:
+        attempts.append(True)
+
+    _kill_stale_tart_pulls(registry_tag)
+
+    last_error = None
+    for use_insecure in attempts:
+        args = ['pull', registry_tag]
+        if use_insecure:
+            args.append('--insecure')
+        logger.warning(
+            "pull_image_only(tag=%s) running command: tart %s",
+            registry_tag,
+            ' '.join(args),
+        )
+        try:
+            _run_with_progress(args, timeout=3600, progress_cb=_progress if progress_cb else None)
+            return
+        except RuntimeError as e:
+            last_error = e
+            logger.warning(
+                "pull_image_only(tag=%s) failed with insecure=%s, will %sretry: %s",
+                registry_tag,
+                use_insecure,
+                '' if use_insecure != attempts[-1] else 'not ',
+                e,
+            )
+            _log_registry_diagnostics(registry_tag)
+    raise RuntimeError(str(last_error))
+
+
 def delete_vm(name):
     """
     Delete local VM (frees disk space).

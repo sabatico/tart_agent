@@ -32,9 +32,29 @@ vnc = vnc_manager.VncManager()
 # In-progress async operation tracker: {vm_name: {op, status, progress, error}}
 _ops = {}
 _ops_lock = threading.Lock()
+
+# In-progress image pull tracker: {op_key: {status, progress, error}}
+_image_ops = {}
+_image_ops_lock = threading.Lock()
 _vms_cache = []
 _vms_cache_at = 0.0
 _vms_cache_lock = threading.Lock()
+
+
+def _set_image_op(op_key, **fields):
+    """Update image pull operation state (separate from VM ops)."""
+    with _image_ops_lock:
+        current = _image_ops.get(op_key, {})
+        if 'progress_pct' in fields and 'transferred_gb' not in fields:
+            total_gb = fields.get('total_gb', current.get('total_gb'))
+            progress_pct = fields.get('progress_pct')
+            try:
+                if total_gb is not None and progress_pct is not None:
+                    fields['transferred_gb'] = round((float(total_gb) * float(progress_pct)) / 100.0, 1)
+            except (TypeError, ValueError):
+                pass
+        current.update(fields)
+        _image_ops[op_key] = current
 
 
 def _set_op(name, **fields):
@@ -510,6 +530,68 @@ def vm_op_status(name):
     """Poll progress of an ongoing async operation."""
     with _ops_lock:
         op = _ops.get(name)
+    if op is None:
+        return jsonify({'status': 'idle'})
+    return jsonify(op)
+
+
+# ── Image pull (gold image pre-cache) ──────────────────────────────────────────
+
+@app.route('/images/pull', methods=['POST'])
+def images_pull():
+    """
+    Pull a remote OCI image into Tart's cache (no clone).
+    Async — poll GET /images/<op_key>/op for progress.
+    """
+    data = request.json or {}
+    registry_tag = (data.get('registry_tag') or '').strip()
+    op_key = (data.get('op_key') or '').strip()
+    expected_disk_gb = data.get('expected_disk_gb')
+
+    if not registry_tag:
+        return jsonify({'error': 'registry_tag is required'}), 400
+    if not op_key:
+        return jsonify({'error': 'op_key is required'}), 400
+
+    def _do_pull():
+        _set_image_op(
+            op_key,
+            status='pulling',
+            progress_pct=0,
+            transferred_gb=0.0,
+            total_gb=expected_disk_gb,
+            last_progress_line='Starting image pull...',
+            error=None,
+        )
+        try:
+            tart_runner.pull_image_only(
+                registry_tag,
+                progress_cb=lambda update: _set_image_op(op_key, **update),
+            )
+            _set_image_op(
+                op_key,
+                status='done',
+                progress_pct=100,
+                last_progress_line='Image pull completed.',
+            )
+        except Exception as e:
+            logger.error("images_pull(op_key=%s, tag=%s) async error: %s", op_key, registry_tag, e)
+            _set_image_op(
+                op_key,
+                status='error',
+                error=str(e),
+                last_progress_line='Image pull failed.',
+            )
+
+    threading.Thread(target=_do_pull, daemon=True).start()
+    return jsonify({'status': 'pulling', 'poll': f'/images/{op_key}/op'})
+
+
+@app.route('/images/<path:op_key>/op')
+def image_op_status(op_key):
+    """Poll progress of an image pull operation."""
+    with _image_ops_lock:
+        op = _image_ops.get(op_key)
     if op is None:
         return jsonify({'status': 'idle'})
     return jsonify(op)

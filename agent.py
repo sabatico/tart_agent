@@ -192,7 +192,8 @@ def _tart_version():
     try:
         import subprocess
         result = subprocess.run(['tart', '--version'],
-                                capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, timeout=5,
+                                env=tart_runner._brew_env())
         return result.stdout.strip()
     except Exception:
         return 'unknown'
@@ -455,7 +456,11 @@ def stop_vm(name):
 
 @app.route('/vms/<name>/save', methods=['POST'])
 def save_vm(name):
-    """Shutdown + push to registry (async). Poll /vms/<name>/op for progress."""
+    """
+    Shutdown + push to registry (async). Poll /vms/<name>/op for progress.
+    Used for save/archive, migrate, and make-gold-image.
+    Deletes local VM only after push succeeds AND manifest is verified in registry.
+    """
     data = request.json
     registry_tag = data['registry_tag']
     expected_disk_gb = data.get('expected_disk_gb')
@@ -479,6 +484,14 @@ def save_vm(name):
                 registry_tag,
                 progress_cb=lambda update: _set_op(name, **update),
             )
+            # Only delete local VM after confirming manifest exists in registry.
+            # Prevents data loss if push reported success but registry did not persist.
+            _set_op(name, status='deleting', last_progress_line='Verifying registry has image...')
+            if not tart_runner._verify_manifest_in_registry(registry_tag):
+                raise RuntimeError(
+                    f'Push completed but manifest not found in registry at {registry_tag}. '
+                    'Local VM kept for safety. Check registry reachability and retry save.'
+                )
             _set_op(name, status='deleting', last_progress_line='Cleaning local VM after push...')
             tart_runner.delete_vm(name)
             _set_op(name, status='done', progress_pct=100, last_progress_line='Save completed.')

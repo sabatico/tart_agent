@@ -143,6 +143,17 @@ def _kill_stale_tart_pulls(registry_tag):
     return killed_pids
 
 
+def _brew_env():
+    """Return an env dict that includes Homebrew bin paths so tart is found
+    even when the agent runs as a launchd service with a minimal PATH."""
+    env = os.environ.copy()
+    homebrew_paths = '/opt/homebrew/bin:/usr/local/bin'
+    current_path = env.get('PATH', '')
+    if homebrew_paths not in current_path:
+        env['PATH'] = homebrew_paths + ':' + current_path
+    return env
+
+
 def _run(args, timeout=30, check=True):
     """Run a tart CLI command. Returns stdout string."""
     cmd = ['tart'] + args
@@ -153,6 +164,7 @@ def _run(args, timeout=30, check=True):
         text=True,
         timeout=timeout,
         check=False,
+        env=_brew_env(),
     )
     if check and result.returncode != 0:
         raise RuntimeError(f"tart {args[0]} failed: {result.stderr.strip()}")
@@ -170,6 +182,7 @@ def _run_with_progress(args, timeout=30, progress_cb=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,
+        env=_brew_env(),
     )
 
     stdout_fd = proc.stdout.fileno() if proc.stdout else None
@@ -255,6 +268,112 @@ def _registry_host_port_from_tag(registry_tag):
     return host, port
 
 
+def _parse_registry_tag(registry_tag):
+    """
+    Parse registry_tag (e.g. host:port/namespace/name:latest) into (host, port, repo, tag).
+    Returns None if parsing fails.
+    """
+    value = (registry_tag or '').strip()
+    if not value or '/' not in value:
+        return None
+    parts = value.split('/')
+    host_port = parts[0]
+    repo_tag = '/'.join(parts[1:])
+    if ':' not in repo_tag:
+        repo, tag = repo_tag, 'latest'
+    else:
+        repo, tag = repo_tag.rsplit(':', 1)
+    parsed = urlparse(f'//{host_port}')
+    host = parsed.hostname
+    port = parsed.port or 5001
+    return host, port, repo.strip('/'), (tag or 'latest').strip()
+
+
+def _verify_manifest_in_registry(registry_tag, retries=3, retry_delay=2):
+    """
+    Verify the manifest exists in the registry before deleting local VM.
+    Only delete local copy after a GOOD end of save — this prevents data loss
+    if push reported success but the registry did not persist the image.
+    Used for save/archive, migrate, and make-gold-image. Retries to handle
+    transient registry propagation delay.
+    """
+    parsed = _parse_registry_tag(registry_tag)
+    if not parsed:
+        logger.warning("verify_manifest: could not parse registry_tag=%r", registry_tag)
+        return False
+    host, port, repo, tag = parsed
+    if not host or not repo:
+        return False
+    scheme = 'https' if port == 443 else 'http'
+    url = f'{scheme}://{host}:{port}/v2/{repo}/manifests/{tag}'
+    curl_args = [
+        'curl',
+        '--noproxy',
+        '*',
+        '-sS',
+        '-o',
+        '/dev/null',
+        '-w',
+        '%{http_code}',
+        '--max-time',
+        '10',
+        '-H',
+        'Accept: application/vnd.oci.image.manifest.v1+json',
+    ]
+    if scheme == 'https':
+        curl_args.append('-k')  # Allow self-signed certs (matches REGISTRY_INSECURE)
+    curl_args.append(url)
+
+    last_code = None
+    for attempt in range(retries):
+        try:
+            result = subprocess.run(
+                curl_args,
+                capture_output=True,
+                text=True,
+                timeout=12,
+                check=False,
+            )
+            code = (result.stdout or '').strip()
+            last_code = code
+            if code == '200':
+                logger.info(
+                    "verify_manifest: manifest exists at %s (attempt %d/%d)",
+                    registry_tag,
+                    attempt + 1,
+                    retries,
+                )
+                return True
+            if attempt < retries - 1:
+                logger.warning(
+                    "verify_manifest: registry returned %s for %s, retrying in %ds (%d/%d)",
+                    code,
+                    registry_tag,
+                    retry_delay,
+                    attempt + 1,
+                    retries,
+                )
+                time.sleep(retry_delay)
+        except Exception as e:
+            logger.warning(
+                "verify_manifest: check failed for %s (attempt %d/%d): %s",
+                registry_tag,
+                attempt + 1,
+                retries,
+                e,
+            )
+            if attempt < retries - 1:
+                time.sleep(retry_delay)
+
+    logger.warning(
+        "verify_manifest: registry returned %s for %s after %d attempts — will NOT delete local VM",
+        last_code or 'error',
+        registry_tag,
+        retries,
+    )
+    return False
+
+
 def _log_registry_diagnostics(registry_tag):
     host, port = _registry_host_port_from_tag(registry_tag)
     if not host:
@@ -334,6 +453,7 @@ def start_vm(name):
         ['tart', 'run', '--no-graphics', '--vnc', name],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
+        env=_brew_env(),
     )
     time.sleep(1)
     if proc.poll() is not None:

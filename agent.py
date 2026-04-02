@@ -294,14 +294,6 @@ def _ram_usage_gb():
         for key, value in re.findall(r'^([^:]+):\s+(\d+)\.', vm_out, flags=re.MULTILINE):
             values[key.strip()] = int(value)
 
-        # Treat active/wired/compressed as used snapshot.
-        used_pages = (
-            values.get('Pages active', 0)
-            + values.get('Pages wired down', 0)
-            + values.get('Pages occupied by compressor', 0)
-        )
-        used_bytes = used_pages * page_size
-
         memsize = subprocess.run(
             ['sysctl', '-n', 'hw.memsize'],
             capture_output=True,
@@ -312,6 +304,16 @@ def _ram_usage_gb():
         total_bytes = int((memsize.stdout or '0').strip() or 0)
         if total_bytes <= 0:
             return None, None
+
+        # Match macOS top: used = total - (free + speculative).
+        # This includes inactive/cached pages, consistent with what users
+        # see in `top` and Activity Monitor.
+        total_pages = total_bytes // page_size
+        free_pages = (
+            values.get('Pages free', 0)
+            + values.get('Pages speculative', 0)
+        )
+        used_bytes = (total_pages - free_pages) * page_size
         used_gb = round(used_bytes / (1024 ** 3), 1)
         total_gb = round(total_bytes / (1024 ** 3), 1)
         return used_gb, total_gb

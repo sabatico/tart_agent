@@ -11,6 +11,15 @@ HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-7000}"
 
 cd "$REPO_DIR"
+
+# Load .env if present so AGENT_TOKEN and other config vars are picked up.
+if [[ -f "$REPO_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO_DIR/.env"
+  set +a
+fi
+
 mkdir -p "$RUN_DIR"
 
 is_agent_process() {

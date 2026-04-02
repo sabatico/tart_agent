@@ -443,7 +443,10 @@ def get_vm_ip(vm_name, wait=5):
 
 def create_vm(name, base_image):
     """Clone a VM from base image (tart clone). Can take up to 10 min for first pull."""
-    _run(['clone', base_image, name], timeout=600)
+    args = ['clone', base_image, name]
+    if agent_config.REGISTRY_INSECURE:
+        args.append('--insecure')
+    _run(args, timeout=600)
 
 
 def start_vm(name):
